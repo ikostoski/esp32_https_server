@@ -1,6 +1,11 @@
 #ifndef SRC_HTTPSSERVERCONSTANTS_HPP_
 #define SRC_HTTPSSERVERCONSTANTS_HPP_
 
+#define HTTPS_TASK_PER_CONNECTION 1
+// TODO:
+// Move this as runtime configurable option to HTTPServer
+// i.e. server->enableParallelConnectios(int taskSize, int taskPrority);
+
 #include "Arduino.h"
 
 // 1: Error
@@ -84,6 +89,13 @@
 // Length of a SHA1 hash
 #ifndef HTTPS_SHA1_LENGTH
 #define HTTPS_SHA1_LENGTH                      20
+#endif
+
+#ifndef HTTPS_CONN_TASK_STACK_SIZE
+#define HTTPS_CONN_TASK_STACK_SIZE             4096
+#endif
+#ifndef HTTPS_CONN_TASK_PRIORITY
+#define HTTPS_CONN_TASK_PRIORITY               (tskIDLE_PRIORITY + 1)
 #endif
 
 #endif /* SRC_HTTPSSERVERCONSTANTS_HPP_ */

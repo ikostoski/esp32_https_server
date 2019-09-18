@@ -36,9 +36,12 @@ public:
   void stop();
   bool isRunning();
 
-  void loop();
+  // Return value is remaining miliseconds if function returned early
+  int loop(int timeoutMs = 0);
 
   void setDefaultHeader(std::string name, std::string value);
+  HTTPHeaders * getDefaultHeaders();
+  int serverSocket();
 
 protected:
   // Static configuration. Port, keys, etc. ====================
@@ -57,6 +60,11 @@ protected:
   boolean _running;
   // The server socket
   int _socket;
+  // Keep state if we have pendig connections
+  bool _pendingConnection;
+  // FreeRTOS Queue to notify idle connectios when there are
+  // pending connections
+  QueueHandle_t _pendingQueue;
 
   // The server socket address, that our service is bound to
   sockaddr_in _sock_addr;
@@ -68,7 +76,13 @@ protected:
   virtual void teardownSocket();
 
   // Helper functions
+  int startConnection(int idx);
   virtual int createConnection(int idx);
+
+  #ifdef HTTPS_TASK_PER_CONNECTION
+  int startConnectionTask(HTTPConnection * connection, const char* name);
+  static void connectionTask(void* param);
+  #endif
 };
 
 }

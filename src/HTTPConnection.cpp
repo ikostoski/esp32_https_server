@@ -14,6 +14,7 @@ HTTPConnection::HTTPConnection(ResourceResolver * resResolver):
   _clientState = CSTATE_UNDEFINED;
   _httpHeaders = NULL;
   _defaultHeaders = NULL;
+  _pendingQueue = NULL;
   _isKeepAlive = false;
   _lastTransmissionTS = millis();
   _shutdownTS = 0;
@@ -26,14 +27,21 @@ HTTPConnection::~HTTPConnection() {
 }
 
 /**
- * Initializes the connection from a server socket.
+ * Initializes the connection
+ */
+void HTTPConnection::initialize(int serverSocketID, HTTPHeaders *defaultHeaders) {
+  _defaultHeaders = defaultHeaders;
+  _serverSocket = serverSocketID;
+}
+
+/**
+ * Accepts the connection from a server socket.
  *
  * The call WILL BLOCK if accept(serverSocketID) blocks. So use select() to check for that in advance.
  */
-int HTTPConnection::initialize(int serverSocketID, HTTPHeaders *defaultHeaders) {
+int HTTPConnection::acceptConnection() {
   if (_connectionState == STATE_UNDEFINED) {
-    _defaultHeaders = defaultHeaders;
-    _socket = accept(serverSocketID, (struct sockaddr * )&_sockAddr, &_addrLen);
+    _socket = accept(_serverSocket, (struct sockaddr * )&_sockAddr, &_addrLen);
 
     // Build up SSL Connection context if the socket has been created successfully
     if (_socket >= 0) {
@@ -87,6 +95,14 @@ bool HTTPConnection::isClosed() {
  */
 bool HTTPConnection::isError() {
   return (_connectionState == STATE_ERROR);
+}
+
+/**
+ * Returns true, if the connection is closed and handler task
+ * is no longer accessing it
+ */
+bool HTTPConnection::isTerminated() {
+  return (isClosed() && (_taskHandle == NULL));
 }
 
 bool HTTPConnection::isSecure() {
@@ -379,7 +395,8 @@ void HTTPConnection::loop() {
         _connectionState = STATE_REQUEST_FINISHED;
       }
 
-      break;
+      if (_connectionState != STATE_REQUEST_FINISHED) break;
+
     case STATE_REQUEST_FINISHED: // Read headers
 
       while (_bufferProcessed < _bufferUnusedIdx && !isClosed()) {
@@ -414,7 +431,8 @@ void HTTPConnection::loop() {
         }
       }
 
-      break;
+      if (_connectionState != STATE_HEADERS_FINISHED) break;
+
     case STATE_HEADERS_FINISHED: // Handle body
       {
         HTTPS_LOGD("Resolving resource...");
@@ -520,14 +538,18 @@ void HTTPConnection::loop() {
             // we have no chance to do so.
             if (!_isKeepAlive) {
               // No KeepAlive -> We are done. Transition to next state.
+              HTTPS_LOGD("No keep-alive");
               if (!isClosed()) {
                 _connectionState = STATE_BODY_FINISHED;
               }
             } else {
               if (res.isResponseBuffered()) {
-                // If the response could be buffered:
+                // If the response is buffered:
+                HTTPS_LOGD("Buffered, set keep-alive");
                 res.setHeader("Connection", "keep-alive");
                 res.finalize();
+              } 
+              if (res.correctContentLength()) {
                 if (_clientState != CSTATE_CLOSED) {
                   // Refresh the timeout for the new request
                   refreshTimeout();
@@ -550,13 +572,16 @@ void HTTPConnection::loop() {
         }
 
       }
-      break;
+      if (_connectionState != STATE_BODY_FINISHED) break;
+
     case STATE_BODY_FINISHED: // Request is complete
       closeConnection();
       break;
+
     case STATE_CLOSING: // As long as we are in closing state, we call closeConnection() again and wait for it to finish or timeout
       closeConnection();
       break;
+
     case STATE_WEBSOCKET: // Do handling of the websocket
       refreshTimeout();  // don't timeout websocket connection
       if(pendingBufferSize() > 0) {
@@ -577,6 +602,58 @@ void HTTPConnection::loop() {
 
 }
 
+#ifdef HTTPS_TASK_PER_CONNECTION
+/**
+ * Wait for data, connection event or timeout (in milliseconds)
+ */
+int HTTPConnection::waitForDataOrEvent(uint32_t timeoutMs) {
+  // Writing to connection seems to be blocking, so leave it out
+  fd_set read_fds, except_fds;
+  FD_ZERO(&read_fds ); FD_SET(_socket, &read_fds);
+  FD_ZERO(&except_fds); FD_SET(_socket, &except_fds);  
+  timeval timeout;
+  timeout.tv_sec  = timeoutMs / 1000;
+  timeout.tv_usec = (timeoutMs - timeout.tv_sec * 1000) * 1000;
+  select(_socket + 1, &read_fds, NULL, &except_fds, &timeout);
+  return (FD_ISSET(_socket, &read_fds) || FD_ISSET(_socket, &except_fds));
+}
+
+/**
+ * Handle connection until it is closed.
+ * Calls loop() when data is avalable or blocks waiting for new data
+ */
+void HTTPConnection::continuosLoop() {
+  while (!isClosed()) {
+    // While there is data ready to be processed and connection is still active    
+    do {
+      loop();
+    } while (!isClosed() && ((_bufferProcessed < _bufferUnusedIdx) || canReadData()));
+
+    if (!isClosed() && !canReadData()) {
+      // No more data ready to be processed and connection is still active
+      uint32_t timeout = _lastTransmissionTS + HTTPS_CONNECTION_TIMEOUT - millis();
+      // Watch out for millis() rollover (uint32_t)
+      if ((timeout > 0) && (timeout < 0x80000000)) {
+        // We want to block here...
+        if (!waitForDataOrEvent(min(timeout, 200U))) {
+          // There was nothing for at least 200ms. 
+          // If we are in idle state...
+          if ((_connectionState == STATE_INITIAL) && (pendingBufferSize() == 0)) {
+            // check is there is another connection pending (no delay)
+            int socket;
+            if ((_pendingQueue != NULL) && (xQueueReceive(_pendingQueue, &socket, 0))) {
+              // There is new connection pending and we got the lottery ticket 
+              // Close this connection early so new one can be serviced...
+              HTTPS_LOGI("Closing idle connection due to pending new connection (FID=%d)", _socket);
+              closeConnection();
+            }
+          }
+        }
+      }
+    }
+  }  
+}
+#endif
 
 bool HTTPConnection::checkWebsocket() {
   if(_httpMethod == "GET" &&

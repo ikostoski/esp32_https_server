@@ -14,6 +14,8 @@ HTTPServer::HTTPServer(const uint16_t port, const uint8_t maxConnections, const 
 
   // Configure runtime data
   _socket = -1;
+  _pendingQueue = xQueueCreate(1, sizeof(int));
+  _pendingConnection = false;
   _running = false;
 }
 
@@ -94,74 +96,178 @@ void HTTPServer::setDefaultHeader(std::string name, std::string value) {
 /**
  * The loop method can either be called by periodical interrupt or in the main loop and handles processing
  * of data
+ * 
+ * If timeout (in millisecods) is supplied, it will wait for event 
+ * on the 'server soceket' for new connection and/or on established 
+ * connection sockets for closing/error.
+ * 
+ * Return value is remaining milliseconds if funtion returned early
  */
-void HTTPServer::loop() {
+int HTTPServer::loop(int timeoutMs) {
 
   // Only handle requests if the server is still running
-  if(!_running) return;
+  if (!_running) {
+    delay(timeoutMs);
+    return 0;
+  }
+
+  uint32_t startMs = millis();
+
+  // Setup fd_sets to check the listerner socket for new connections
+  int max_fd = -1;
 
   // Step 1: Process existing connections
   // Process open connections and store the index of a free connection
   // (we might use that later on)
+  fd_set except_fds;
+  FD_ZERO(&except_fds);
   int freeConnectionIdx = -1;
   for (int i = 0; i < _maxConnections; i++) {
     // Fetch a free index in the pointer array
     if (_connections[i] == NULL) {
       freeConnectionIdx = i;
-
     } else {
       // if there is a connection (_connections[i]!=NULL), check if its open or closed:
-      if (_connections[i]->isClosed()) {
+      if (_connections[i]->isTerminated()) {
         // if it's closed, clean up:
         delete _connections[i];
         _connections[i] = NULL;
         freeConnectionIdx = i;
       } else {
-        // if not, process it:
+        // Add the connection to the except_fds set
+        // to wakeup from select if connection is closed
+        int fd = _connections[i]->_socket;
+        FD_SET(fd, &except_fds);
+        if (fd > max_fd) max_fd = fd;
+        #ifndef HTTPS_TASK_PER_CONNECTION
+        // and process it
         _connections[i]->loop();
+        #endif
       }
     }
+  }
+
+  // Step 2: If we already have know pending connection
+  // and slot for it, accept it...
+  if (_pendingConnection && (freeConnectionIdx > -1)) {
+    startConnection(freeConnectionIdx);
+    freeConnectionIdx = -1;
+    // Check again if we have open connection slot
+    // to avoid terminating another idle connection
+    for (int i = 0; i < _maxConnections; i++) {
+      if (_connections[i] == NULL) freeConnectionIdx = i;
+    }
+  } 
+
+  fd_set read_fds;
+  FD_ZERO(&read_fds);
+  if (!_pendingConnection) {
+    // Add listener socket to read_fds set
+    FD_SET(_socket, &read_fds);
+    if (_socket > max_fd) max_fd = _socket;
   }
  
-  // Step 2: Check for new connections
-  // This makes only sense if there is space to store the connection
-  if (freeConnectionIdx > -1) {
+  // Step 3: Check for new connections or wakeup
+  // if existing connection is closed
+  // Uses the timeoutMs value as timeout (miliseconds)
+  timeval timeout;
+  timeout.tv_sec  = (timeoutMs / 1000);
+  timeout.tv_usec = (timeoutMs - timeout.tv_sec) * 1000; 
 
-    // We create a file descriptor set to be able to use the select function
-    fd_set sockfds;
-    // Out socket is the only socket in this set
-    FD_ZERO(&sockfds);
-    FD_SET(_socket, &sockfds);
+  // Wait for event on descriptors
+  int nfds = select(max_fd+1, &read_fds, NULL, &except_fds, &timeout);
 
-    // We define a "immediate" timeout
-    timeval timeout;
-    timeout.tv_sec  = 0;
-    timeout.tv_usec = 0; // Return immediately, if possible
-
-    // Wait for input
-    // As by 2017-12-14, it seems that FD_SETSIZE is defined as 0x40, but socket IDs now
-    // start at 0x1000, so we need to use _socket+1 here
-    select(_socket + 1, &sockfds, NULL, NULL, &timeout);
-
-    // There is input
-    if (FD_ISSET(_socket, &sockfds)) {
-      int socketIdentifier = createConnection(freeConnectionIdx);
-
-      // If initializing did not work, discard the new socket immediately
-      if (socketIdentifier < 0) {
-        delete _connections[freeConnectionIdx];
-        _connections[freeConnectionIdx] = NULL;
-      }
+  // If we have new connection on the listener socket
+  if ((nfds > 0) && FD_ISSET(_socket, &read_fds)) {
+    // And if there is space to accept the connection
+    if (freeConnectionIdx > -1) {
+      startConnection(freeConnectionIdx);
+    } else if (!_pendingConnection) {
+      // No space for connections and no exisitng pending connection.
+      // Set the guard flag and put the listener socket (anything actually) 
+      // into _pendingQueue so idle connection task can pick it up.
+      HTTPS_LOGD("Notifying tasks that there is pending connection");
+      _pendingConnection = true;
+      xQueueSend(_pendingQueue, &_socket, 0);
     }
-
   }
+
+  // Return the remaining time from the timeoutMs requested
+  uint32_t deltaMs = (startMs + timeoutMs - millis());
+  if (deltaMs > 0x7FFFFFFF) deltaMs = 0;
+  return deltaMs;
+}
+
+/**
+ * Start new connection with index idx and 
+ * reset pending connection flag and queue
+ */
+int HTTPServer::startConnection(int idx) {
+  // Remove pending guard flag
+  _pendingConnection = false;
+  // Also remove item from the pending queue, if there is one
+  int dummy;
+  xQueueReceive(_pendingQueue, &dummy, 0);
+  int socketIdentifier = createConnection(idx);
+  if (socketIdentifier < 0) {
+    // initializing did not work, discard the new socket immediately
+    delete _connections[idx];
+    _connections[idx] = NULL;
+  } 
+  return socketIdentifier;
 }
 
 int HTTPServer::createConnection(int idx) {
   HTTPConnection * newConnection = new HTTPConnection(this);
   _connections[idx] = newConnection;
-  return newConnection->initialize(_socket, &_defaultHeaders);
+  newConnection->initialize(_socket, &_defaultHeaders);  
+  #ifdef HTTPS_TASK_PER_CONNECTION
+  return startConnectionTask(newConnection, "HTTPConn");
+  #else
+  return newConnection->acceptConnection();  
+  #endif
 }
+
+#ifdef HTTPS_TASK_PER_CONNECTION
+/** 
+ * Start connection task
+ */ 
+int HTTPServer::startConnectionTask(HTTPConnection * connection, const char* name) {
+  connection->_pendingQueue = _pendingQueue;
+  BaseType_t taskRes = xTaskCreate(
+    connectionTask, 
+    name, 
+    HTTPS_CONN_TASK_STACK_SIZE,
+    connection,
+    HTTPS_CONN_TASK_PRIORITY,
+    &connection->_taskHandle
+  );
+  if (taskRes != pdTRUE) {
+    HTTPS_LOGE("Error starting connection task");
+    return -1;
+  }
+  HTTPS_LOGD("Started connection task %p", connection->_taskHandle);
+  return 1; // We don't know the socket ID here
+}
+
+/**
+ * This static method accepts the connection amd than calls
+ * continuosLoop method until connection is closed
+ */
+void HTTPServer::connectionTask(void* param) {
+  HTTPConnection* connection = static_cast<HTTPConnection*>(param);
+  int res = connection->acceptConnection();
+  if (res > 0) {
+    connection->continuosLoop();
+  } else {
+    HTTPS_LOGE("Faled to accept connection in task %p", connection->_taskHandle);    
+  }
+  HTTPS_LOGD("Ending connection task %p (FID=%d)", connection->_taskHandle, res);
+  connection->_taskHandle = NULL;
+  vTaskDelete(NULL);
+}
+#endif
+
 
 /**
  * This method prepares the tcp server socket

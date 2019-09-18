@@ -5,6 +5,7 @@ namespace httpsserver {
 
 HTTPSConnection::HTTPSConnection(ResourceResolver * resResolver):
   HTTPConnection(resResolver) {
+  _sslCtx = NULL;
   _ssl = NULL;
 }
 
@@ -18,19 +19,27 @@ bool HTTPSConnection::isSecure() {
 }
 
 /**
- * Initializes the connection from a server socket.
+ * Initializes the connection with SSL context
+ */
+void HTTPSConnection::initialize(int serverSocketID, SSL_CTX * sslCtx, HTTPHeaders *defaultHeaders) {
+  HTTPConnection::initialize(serverSocketID, defaultHeaders);
+  _sslCtx = sslCtx;
+}
+
+/**
+ * Accepts the connection from a server socket.
  *
  * The call WILL BLOCK if accept(serverSocketID) blocks. So use select() to check for that in advance.
  */
-int HTTPSConnection::initialize(int serverSocketID, SSL_CTX * sslCtx, HTTPHeaders *defaultHeaders) {
+int HTTPSConnection::acceptConnection() {
   if (_connectionState == STATE_UNDEFINED) {
     // Let the base class connect the plain tcp socket
-    int resSocket = HTTPConnection::initialize(serverSocketID, defaultHeaders);
+    int resSocket = HTTPConnection::acceptConnection();
 
     // Build up SSL Connection context if the socket has been created successfully
     if (resSocket >= 0) {
 
-      _ssl = SSL_new(sslCtx);
+      _ssl = SSL_new(_sslCtx);
 
       if (_ssl) {
         // Bind SSL to the socket
@@ -40,6 +49,7 @@ int HTTPSConnection::initialize(int serverSocketID, SSL_CTX * sslCtx, HTTPHeader
           // Perform the handshake
           success = SSL_accept(_ssl);
           if (success) {
+            HTTPS_LOGI("SSL accepted (FID=%d)", resSocket);
             return resSocket;
           } else {
             HTTPS_LOGE("SSL_accept failed. Aborting handshake. FID=%d", resSocket);

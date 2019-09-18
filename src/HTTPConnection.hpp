@@ -13,6 +13,11 @@
 #undef read
 #include "lwip/sockets.h"
 
+#ifdef HTTPS_TASK_PER_CONNECTION  
+// FreeRTOS queues
+#include "freertos/queue.h"
+#endif
+
 #include "HTTPSServerConstants.hpp"
 #include "ConnectionContext.hpp"
 
@@ -39,15 +44,22 @@ public:
   HTTPConnection(ResourceResolver * resResolver);
   virtual ~HTTPConnection();
 
-  virtual int initialize(int serverSocketID, HTTPHeaders *defaultHeaders);
+  virtual void initialize(int serverSocketID, HTTPHeaders *defaultHeaders);
+  virtual int acceptConnection();
   virtual void closeConnection();
   virtual bool isSecure();
 
   void loop();
   bool isClosed();
   bool isError();
+  bool isTerminated();
+  #ifdef HTTPS_TASK_PER_CONNECTION  
+  void continuosLoop();
+  #endif
 
 protected:
+  friend class HTTPServer;
+  friend class HTTPSServer;
   friend class HTTPRequest;
   friend class HTTPResponse;
   friend class WebsocketInputStreambuf;
@@ -135,6 +147,8 @@ private:
   struct sockaddr _sockAddr;
   socklen_t _addrLen;
   int _socket;
+  int _serverSocket;
+  QueueHandle_t _pendingQueue;
 
   // Resource resolver used to resolve resources
   ResourceResolver * _resResolver;
@@ -159,6 +173,11 @@ private:
   //Websocket connection
   WebsocketHandler * _wsHandler;
 
+  // Handler task
+  TaskHandle_t _taskHandle = NULL;
+  #ifdef HTTPS_TASK_PER_CONNECTION
+  int waitForDataOrEvent(uint32_t timeoutMs);
+  #endif
 };
 
 void handleWebsocketHandshake(HTTPRequest * req, HTTPResponse * res);

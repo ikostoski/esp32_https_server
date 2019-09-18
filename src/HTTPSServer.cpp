@@ -57,7 +57,12 @@ void HTTPSServer::teardownSocket() {
 int HTTPSServer::createConnection(int idx) {
   HTTPSConnection * newConnection = new HTTPSConnection(this);
   _connections[idx] = newConnection;
-  return newConnection->initialize(_socket, _sslctx, &_defaultHeaders);
+  newConnection->initialize(_socket, _sslctx, &_defaultHeaders);
+  #ifdef HTTPS_TASK_PER_CONNECTION
+  return startConnectionTask(newConnection, "HTTPSConn");
+  #else
+  return newConnection->acceptConnection();
+  #endif
 }
 
 /**

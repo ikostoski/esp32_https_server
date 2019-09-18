@@ -34,7 +34,8 @@ public:
   HTTPSConnection(ResourceResolver * resResolver);
   virtual ~HTTPSConnection();
 
-  virtual int initialize(int serverSocketID, SSL_CTX * sslCtx, HTTPHeaders *defaultHeaders);
+  virtual void initialize(int serverSocketID, SSL_CTX * sslCtx, HTTPHeaders *defaultHeaders);
+  virtual int acceptConnection(); 
   virtual void closeConnection();
   virtual bool isSecure();
 
@@ -49,6 +50,7 @@ protected:
 
 private:
   // SSL context for this connection
+  SSL_CTX * _sslCtx;
   SSL * _ssl;
 
 };
