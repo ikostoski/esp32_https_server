@@ -32,6 +32,9 @@ public:
   HTTPSServer(SSLCert * cert, const uint16_t portHTTPS = 443, const uint8_t maxConnections = 4, const in_addr_t bindAddress = 0);
   virtual ~HTTPSServer();
 
+  // RFC 5077 TLS session tickets
+  void enableTLSTickets(uint32_t liftimeSeconds = 86400);
+
 private:
   // Static configuration. Port, keys, etc. ====================
   // Certificate that should be used (includes private key)
@@ -39,6 +42,7 @@ private:
  
   //// Runtime data ============================================
   SSL_CTX * _sslctx;
+  TLSTickets * _TLSTickets;
   // Status of the server: Are we running, or not?
 
   // Setup functions

@@ -23,6 +23,7 @@
 #include "ResourceNode.hpp"
 #include "HTTPRequest.hpp"
 #include "HTTPResponse.hpp"
+#include "TLSTickets.hpp"
 
 namespace httpsserver {
 
@@ -34,7 +35,7 @@ public:
   HTTPSConnection(ResourceResolver * resResolver);
   virtual ~HTTPSConnection();
 
-  virtual void initialize(int serverSocketID, SSL_CTX * sslCtx, HTTPHeaders *defaultHeaders);
+  virtual void initialize(int serverSocketID, HTTPHeaders *defaultHeaders, SSL_CTX * sslCtx, TLSTickets * tickets);
   virtual int acceptConnection(); 
   virtual void closeConnection();
   virtual bool isSecure();
@@ -52,6 +53,7 @@ private:
   // SSL context for this connection
   SSL_CTX * _sslCtx;
   SSL * _ssl;
+	TLSTickets * _TLSTickets;
 
 };
 

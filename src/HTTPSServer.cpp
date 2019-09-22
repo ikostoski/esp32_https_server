@@ -9,6 +9,7 @@ HTTPSServer::HTTPSServer(SSLCert * cert, const uint16_t port, const uint8_t maxC
 
   // Configure runtime data
   _sslctx = NULL;
+  _TLSTickets = NULL;
 }
 
 HTTPSServer::~HTTPSServer() {
@@ -45,6 +46,10 @@ uint8_t HTTPSServer::setupSocket() {
   }
 }
 
+void HTTPSServer::enableTLSTickets(uint32_t liftimeSeconds) {
+  _TLSTickets = new TLSTickets("esp32_https_server", liftimeSeconds);
+}
+
 void HTTPSServer::teardownSocket() {
 
   HTTPServer::teardownSocket();
@@ -57,7 +62,7 @@ void HTTPSServer::teardownSocket() {
 int HTTPSServer::createConnection(int idx) {
   HTTPSConnection * newConnection = new HTTPSConnection(this);
   _connections[idx] = newConnection;
-  newConnection->initialize(_socket, _sslctx, &_defaultHeaders);
+  newConnection->initialize(_socket, &_defaultHeaders, _sslctx, _TLSTickets);
   #ifdef HTTPS_TASK_PER_CONNECTION
   return startConnectionTask(newConnection, "HTTPSConn");
   #else
